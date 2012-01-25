@@ -6,9 +6,9 @@ __all__ = ['ConnectionError', 'connect']
 
 _connection_settings = {
     'host': 'localhost',
-    'port': 27017,
-    'pool_size': 1,
+    'port': 27017
 }
+
 _connection = None
 
 _db_name = None
@@ -25,10 +25,7 @@ def _get_connection():
     global _connection
     # Connect to the database if not already connected
     if _connection is None:
-        try:
-            _connection = Connection(**_connection_settings)
-        except:
-            raise ConnectionError('Cannot connect to the database')
+        _connection = Connection(**_connection_settings)
     return _connection
 
 
