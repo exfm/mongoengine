@@ -279,8 +279,8 @@ class ComplexBaseField(BaseField):
                 else:
                     [self.field.validate(v) for v in value]
             except Exception, err:
-                raise ValidationError('Invalid %s item (%s)' % (
-                        self.field.__class__.__name__, str(v)))
+                raise ValidationError('Invalid %s item (%s) %s %s' % (
+                        self.field.__class__.__name__, str(v), self.field, err))
 
     def prepare_query_value(self, op, value):
         return self.to_mongo(value)
@@ -682,6 +682,9 @@ class BaseDocument(object):
         """
         # get the class name from the document, falling back to the given
         # class if unavailable
+        if not son:
+            return None
+
         class_name = son.get(u'_cls', cls._class_name)
         data = dict((str(key), value) for key, value in son.items())
 
