@@ -18,6 +18,9 @@ MongoDB. To install it, simply run
 :doc:`apireference`
   The complete API documentation.
 
+:doc:`upgrade`
+  How to upgrade MongoEngine.
+
 :doc:`django`
   Using MongoEngine and Django
 
@@ -31,10 +34,10 @@ To get help with using MongoEngine, use the `MongoEngine Users mailing list
 Contributing
 ------------
 
-The source is available on `GitHub <http://github.com/hmarr/mongoengine>`_ and
+The source is available on `GitHub <http://github.com/MongoEngine/mongoengine>`_ and
 contributions are always encouraged. Contributions can be as simple as
 minor tweaks to this documentation. To contribute, fork the project on
-`GitHub <http://github.com/hmarr/mongoengine>`_ and send a
+`GitHub <http://github.com/MongoEngine/mongoengine>`_ and send a
 pull request.
 
 Also, you can join the developers' `mailing list
@@ -42,7 +45,8 @@ Also, you can join the developers' `mailing list
 
 Changes
 -------
-See the :doc:`changelog` for a full list of changes to MongoEngine.
+See the :doc:`changelog` for a full list of changes to MongoEngine and
+:doc:`upgrade` for upgrade information.
 
 .. toctree::
    :hidden:

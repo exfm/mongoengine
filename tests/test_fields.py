@@ -1,20 +1,33 @@
-import unittest
+# -*- coding: utf-8 -*-
+from __future__ import with_statement
 import datetime
+import os
+import unittest
+import uuid
+import tempfile
+
 from decimal import Decimal
 
-import pymongo
+from bson import Binary, DBRef, ObjectId
 import gridfs
 
+from nose.plugins.skip import SkipTest
 from mongoengine import *
-from mongoengine.connection import _get_db
+from mongoengine.connection import get_db
 from mongoengine.base import _document_registry, NotRegistered
+from mongoengine.python_support import PY3, b, StringIO, bin_type
 
+TEST_IMAGE_PATH = os.path.join(os.path.dirname(__file__), 'mongoengine.png')
 
 class FieldTest(unittest.TestCase):
 
     def setUp(self):
         connect(db='mongoenginetest')
-        self.db = _get_db()
+        self.db = get_db()
+
+    def tearDown(self):
+        self.db.drop_collection('fs.files')
+        self.db.drop_collection('fs.chunks')
 
     def test_default_values(self):
         """Ensure that default field values are used when creating a document.
@@ -43,6 +56,93 @@ class FieldTest(unittest.TestCase):
         self.assertRaises(ValidationError, person.validate)
         person = Person(age=30)
         self.assertRaises(ValidationError, person.validate)
+
+    def test_not_required_handles_none_in_update(self):
+        """Ensure that every fields should accept None if required is False.
+        """
+
+        class HandleNoneFields(Document):
+            str_fld = StringField()
+            int_fld = IntField()
+            flt_fld = FloatField()
+            comp_dt_fld = ComplexDateTimeField()
+
+        HandleNoneFields.drop_collection()
+
+        doc = HandleNoneFields()
+        doc.str_fld = u'spam ham egg'
+        doc.int_fld = 42
+        doc.flt_fld = 4.2
+        doc.com_dt_fld = datetime.datetime.utcnow()
+        doc.save()
+
+        res = HandleNoneFields.objects(id=doc.id).update(
+            set__str_fld=None,
+            set__int_fld=None,
+            set__flt_fld=None,
+            set__comp_dt_fld=None,
+        )
+        self.assertEqual(res, 1)
+
+        # Retrive data from db and verify it.
+        ret = HandleNoneFields.objects.all()[0]
+        self.assertEqual(ret.str_fld, None)
+        self.assertEqual(ret.int_fld, None)
+        self.assertEqual(ret.flt_fld, None)
+
+        # Return current time if retrived value is None.
+        self.assertTrue(isinstance(ret.comp_dt_fld, datetime.datetime))
+
+    def test_not_required_handles_none_from_database(self):
+        """Ensure that every fields can handle null values from the database.
+        """
+
+        class HandleNoneFields(Document):
+            str_fld = StringField(required=True)
+            int_fld = IntField(required=True)
+            flt_fld = FloatField(required=True)
+            comp_dt_fld = ComplexDateTimeField(required=True)
+
+        HandleNoneFields.drop_collection()
+
+        doc = HandleNoneFields()
+        doc.str_fld = u'spam ham egg'
+        doc.int_fld = 42
+        doc.flt_fld = 4.2
+        doc.com_dt_fld = datetime.datetime.utcnow()
+        doc.save()
+
+        collection = self.db[HandleNoneFields._get_collection_name()]
+        obj = collection.update({"_id": doc.id}, {"$unset": {
+            "str_fld": 1,
+            "int_fld": 1,
+            "flt_fld": 1,
+            "comp_dt_fld": 1}
+        })
+
+        # Retrive data from db and verify it.
+        ret = HandleNoneFields.objects.all()[0]
+
+        self.assertEqual(ret.str_fld, None)
+        self.assertEqual(ret.int_fld, None)
+        self.assertEqual(ret.flt_fld, None)
+        # Return current time if retrived value is None.
+        self.assertTrue(isinstance(ret.comp_dt_fld, datetime.datetime))
+
+        self.assertRaises(ValidationError, ret.validate)
+
+    def test_int_and_float_ne_operator(self):
+        class TestDocument(Document):
+            int_fld = IntField()
+            float_fld = FloatField()
+
+        TestDocument.drop_collection()
+
+        TestDocument(int_fld=None, float_fld=None).save()
+        TestDocument(int_fld=1, float_fld=1).save()
+
+        self.assertEqual(1, TestDocument.objects(int_fld__ne=None).count())
+        self.assertEqual(1, TestDocument.objects(float_fld__ne=None).count())
 
     def test_object_id_validation(self):
         """Ensure that invalid values cannot be assigned to string fields.
@@ -175,6 +275,57 @@ class FieldTest(unittest.TestCase):
         person.admin = 'Yes'
         self.assertRaises(ValidationError, person.validate)
 
+    def test_uuid_field_string(self):
+        """Test UUID fields storing as String
+        """
+        class Person(Document):
+            api_key = UUIDField(binary=False)
+
+        Person.drop_collection()
+
+        uu = uuid.uuid4()
+        Person(api_key=uu).save()
+        self.assertEqual(1, Person.objects(api_key=uu).count())
+        self.assertEqual(uu, Person.objects.first().api_key)
+
+        person = Person()
+        valid = (uuid.uuid4(), uuid.uuid1())
+        for api_key in valid:
+            person.api_key = api_key
+            person.validate()
+
+        invalid = ('9d159858-549b-4975-9f98-dd2f987c113g',
+                   '9d159858-549b-4975-9f98-dd2f987c113')
+        for api_key in invalid:
+            person.api_key = api_key
+            self.assertRaises(ValidationError, person.validate)
+
+    def test_uuid_field_binary(self):
+        """Test UUID fields storing as Binary object
+        """
+        class Person(Document):
+            api_key = UUIDField(binary=True)
+
+        Person.drop_collection()
+
+        uu = uuid.uuid4()
+        Person(api_key=uu).save()
+        self.assertEqual(1, Person.objects(api_key=uu).count())
+        self.assertEqual(uu, Person.objects.first().api_key)
+
+        person = Person()
+        valid = (uuid.uuid4(), uuid.uuid1())
+        for api_key in valid:
+            person.api_key = api_key
+            person.validate()
+
+        invalid = ('9d159858-549b-4975-9f98-dd2f987c113g',
+                   '9d159858-549b-4975-9f98-dd2f987c113')
+        for api_key in invalid:
+            person.api_key = api_key
+            self.assertRaises(ValidationError, person.validate)
+
+
     def test_datetime_validation(self):
         """Ensure that invalid values cannot be assigned to datetime fields.
         """
@@ -210,7 +361,7 @@ class FieldTest(unittest.TestCase):
         log.date = datetime.date.today()
         log.save()
         log.reload()
-        self.assertEquals(log.date.date(), datetime.date.today())
+        self.assertEqual(log.date.date(), datetime.date.today())
 
         LogEntry.drop_collection()
 
@@ -221,8 +372,8 @@ class FieldTest(unittest.TestCase):
         log.date = d1
         log.save()
         log.reload()
-        self.assertNotEquals(log.date, d1)
-        self.assertEquals(log.date, d2)
+        self.assertNotEqual(log.date, d1)
+        self.assertEqual(log.date, d2)
 
         # Post UTC - microseconds are rounded (down) nearest millisecond
         d1 = datetime.datetime(1970, 01, 01, 00, 00, 01, 9999)
@@ -230,35 +381,19 @@ class FieldTest(unittest.TestCase):
         log.date = d1
         log.save()
         log.reload()
-        self.assertNotEquals(log.date, d1)
-        self.assertEquals(log.date, d2)
+        self.assertNotEqual(log.date, d1)
+        self.assertEqual(log.date, d2)
 
-        # Pre UTC dates microseconds below 1000 are dropped
-        d1 = datetime.datetime(1969, 12, 31, 23, 59, 59, 999)
-        d2 = datetime.datetime(1969, 12, 31, 23, 59, 59)
-        log.date = d1
-        log.save()
-        log.reload()
-        self.assertNotEquals(log.date, d1)
-        self.assertEquals(log.date, d2)
-
-        # Pre UTC microseconds above 1000 is wonky.
-        # log.date has an invalid microsecond value so I can't construct
-        # a date to compare.
-        #
-        # However, the timedelta is predicable with pre UTC timestamps
-        # It always adds 16 seconds and [777216-776217] microseconds
-        for i in xrange(1001, 3113, 33):
-            d1 = datetime.datetime(1969, 12, 31, 23, 59, 59, i)
+        if not PY3:
+            # Pre UTC dates microseconds below 1000 are dropped
+            # This does not seem to be true in PY3
+            d1 = datetime.datetime(1969, 12, 31, 23, 59, 59, 999)
+            d2 = datetime.datetime(1969, 12, 31, 23, 59, 59)
             log.date = d1
             log.save()
             log.reload()
-            self.assertNotEquals(log.date, d1)
-
-            delta = log.date - d1
-            self.assertEquals(delta.seconds, 16)
-            microseconds = 777216 - (i % 1000)
-            self.assertEquals(delta.microseconds, microseconds)
+            self.assertNotEqual(log.date, d1)
+            self.assertEqual(log.date, d2)
 
         LogEntry.drop_collection()
 
@@ -277,21 +412,21 @@ class FieldTest(unittest.TestCase):
         log.date = d1
         log.save()
         log.reload()
-        self.assertEquals(log.date, d1)
+        self.assertEqual(log.date, d1)
 
         # Post UTC - microseconds are rounded (down) nearest millisecond - with default datetimefields
         d1 = datetime.datetime(1970, 01, 01, 00, 00, 01, 9999)
         log.date = d1
         log.save()
         log.reload()
-        self.assertEquals(log.date, d1)
+        self.assertEqual(log.date, d1)
 
         # Pre UTC dates microseconds below 1000 are dropped - with default datetimefields
         d1 = datetime.datetime(1969, 12, 31, 23, 59, 59, 999)
         log.date = d1
         log.save()
         log.reload()
-        self.assertEquals(log.date, d1)
+        self.assertEqual(log.date, d1)
 
         # Pre UTC microseconds above 1000 is wonky - with default datetimefields
         # log.date has an invalid microsecond value so I can't construct
@@ -301,7 +436,7 @@ class FieldTest(unittest.TestCase):
             log.date = d1
             log.save()
             log.reload()
-            self.assertEquals(log.date, d1)
+            self.assertEqual(log.date, d1)
             log1 = LogEntry.objects.get(date=d1)
             self.assertEqual(log, log1)
 
@@ -322,7 +457,7 @@ class FieldTest(unittest.TestCase):
         log.save()
 
         log1 = LogEntry.objects.get(date=d1)
-        self.assertEquals(log, log1)
+        self.assertEqual(log, log1)
 
         LogEntry.drop_collection()
 
@@ -337,27 +472,27 @@ class FieldTest(unittest.TestCase):
         logs = LogEntry.objects.order_by("date")
         count = logs.count()
         i = 0
-        while i == count-1:
-            self.assertTrue(logs[i].date <= logs[i+1].date)
-            i +=1
+        while i == count - 1:
+            self.assertTrue(logs[i].date <= logs[i + 1].date)
+            i += 1
 
         logs = LogEntry.objects.order_by("-date")
         count = logs.count()
         i = 0
-        while i == count-1:
-            self.assertTrue(logs[i].date >= logs[i+1].date)
-            i +=1
+        while i == count - 1:
+            self.assertTrue(logs[i].date >= logs[i + 1].date)
+            i += 1
 
         # Test searching
-        logs = LogEntry.objects.filter(date__gte=datetime.datetime(1980,1,1))
+        logs = LogEntry.objects.filter(date__gte=datetime.datetime(1980, 1, 1))
         self.assertEqual(logs.count(), 30)
 
-        logs = LogEntry.objects.filter(date__lte=datetime.datetime(1980,1,1))
+        logs = LogEntry.objects.filter(date__lte=datetime.datetime(1980, 1, 1))
         self.assertEqual(logs.count(), 30)
 
         logs = LogEntry.objects.filter(
-            date__lte=datetime.datetime(2011,1,1),
-            date__gte=datetime.datetime(2000,1,1),
+            date__lte=datetime.datetime(2011, 1, 1),
+            date__gte=datetime.datetime(2000, 1, 1),
         )
         self.assertEqual(logs.count(), 10)
 
@@ -459,6 +594,31 @@ class FieldTest(unittest.TestCase):
 
         BlogPost.drop_collection()
 
+    def test_reverse_list_sorting(self):
+        '''Ensure that a reverse sorted list field properly sorts values'''
+
+        class Category(EmbeddedDocument):
+            count = IntField()
+            name = StringField()
+
+        class CategoryList(Document):
+            categories = SortedListField(EmbeddedDocumentField(Category), ordering='count', reverse=True)
+            name = StringField()
+
+        catlist = CategoryList(name="Top categories")
+        cat1 = Category(name='posts', count=10)
+        cat2 = Category(name='food', count=100)
+        cat3 = Category(name='drink', count=40)
+        catlist.categories = [cat1, cat2, cat3]
+        catlist.save()
+        catlist.reload()
+
+        self.assertEqual(catlist.categories[0].name, cat2.name)
+        self.assertEqual(catlist.categories[1].name, cat3.name)
+        self.assertEqual(catlist.categories[2].name, cat1.name)
+
+        CategoryList.drop_collection()
+
     def test_list_field(self):
         """Ensure that list types work as expected.
         """
@@ -485,15 +645,29 @@ class FieldTest(unittest.TestCase):
         post.info = [{'test': 3}]
         post.save()
 
-
-        self.assertEquals(BlogPost.objects.count(), 3)
-        self.assertEquals(BlogPost.objects.filter(info__exact='test').count(), 1)
-        self.assertEquals(BlogPost.objects.filter(info__0__test='test').count(), 1)
+        self.assertEqual(BlogPost.objects.count(), 3)
+        self.assertEqual(BlogPost.objects.filter(info__exact='test').count(), 1)
+        self.assertEqual(BlogPost.objects.filter(info__0__test='test').count(), 1)
 
         # Confirm handles non strings or non existing keys
-        self.assertEquals(BlogPost.objects.filter(info__0__test__exact='5').count(), 0)
-        self.assertEquals(BlogPost.objects.filter(info__100__test__exact='test').count(), 0)
+        self.assertEqual(BlogPost.objects.filter(info__0__test__exact='5').count(), 0)
+        self.assertEqual(BlogPost.objects.filter(info__100__test__exact='test').count(), 0)
         BlogPost.drop_collection()
+
+    def test_list_field_passed_in_value(self):
+        class Foo(Document):
+            bars = ListField(ReferenceField("Bar"))
+
+        class Bar(Document):
+            text = StringField()
+
+        bar = Bar(text="hi")
+        bar.save()
+
+        foo = Foo(bars=[])
+        foo.bars.append(bar)
+        self.assertEqual(repr(foo.bars), '[<Bar: Bar object>]')
+
 
     def test_list_field_strict(self):
         """Ensure that list field handles validation if provided a strict field type."""
@@ -514,6 +688,39 @@ class FieldTest(unittest.TestCase):
         self.assertRaises(ValidationError, create_invalid_mapping)
 
         Simple.drop_collection()
+
+    def test_list_field_rejects_strings(self):
+        """Strings aren't valid list field data types"""
+
+        class Simple(Document):
+            mapping = ListField()
+
+        Simple.drop_collection()
+        e = Simple()
+        e.mapping = 'hello world'
+
+        self.assertRaises(ValidationError, e.save)
+
+    def test_complex_field_required(self):
+        """Ensure required cant be None / Empty"""
+
+        class Simple(Document):
+            mapping = ListField(required=True)
+
+        Simple.drop_collection()
+        e = Simple()
+        e.mapping = []
+
+        self.assertRaises(ValidationError, e.save)
+
+        class Simple(Document):
+            mapping = DictField(required=True)
+
+        Simple.drop_collection()
+        e = Simple()
+        e.mapping = {}
+
+        self.assertRaises(ValidationError, e.save)
 
     def test_list_field_complex(self):
         """Ensure that the list fields can handle the complex types."""
@@ -544,20 +751,20 @@ class FieldTest(unittest.TestCase):
         self.assertTrue(isinstance(e2.mapping[1], IntegerSetting))
 
         # Test querying
-        self.assertEquals(Simple.objects.filter(mapping__1__value=42).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__2__number=1).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__2__complex__value=42).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__2__list__0__value=42).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__2__list__1__value='foo').count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__1__value=42).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__2__number=1).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__2__complex__value=42).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__2__list__0__value=42).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__2__list__1__value='foo').count(), 1)
 
         # Confirm can update
         Simple.objects().update(set__mapping__1=IntegerSetting(value=10))
-        self.assertEquals(Simple.objects.filter(mapping__1__value=10).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__1__value=10).count(), 1)
 
         Simple.objects().update(
             set__mapping__2__list__1=StringSetting(value='Boo'))
-        self.assertEquals(Simple.objects.filter(mapping__2__list__1__value='foo').count(), 0)
-        self.assertEquals(Simple.objects.filter(mapping__2__list__1__value='Boo').count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__2__list__1__value='foo').count(), 0)
+        self.assertEqual(Simple.objects.filter(mapping__2__list__1__value='Boo').count(), 1)
 
         Simple.drop_collection()
 
@@ -582,6 +789,9 @@ class FieldTest(unittest.TestCase):
         post.info = {'the.title': 'test'}
         self.assertRaises(ValidationError, post.validate)
 
+        post.info = {1: 'test'}
+        self.assertRaises(ValidationError, post.validate)
+
         post.info = {'title': 'test'}
         post.save()
 
@@ -593,13 +803,20 @@ class FieldTest(unittest.TestCase):
         post.info = {'details': {'test': 3}}
         post.save()
 
-        self.assertEquals(BlogPost.objects.count(), 3)
-        self.assertEquals(BlogPost.objects.filter(info__title__exact='test').count(), 1)
-        self.assertEquals(BlogPost.objects.filter(info__details__test__exact='test').count(), 1)
+        self.assertEqual(BlogPost.objects.count(), 3)
+        self.assertEqual(BlogPost.objects.filter(info__title__exact='test').count(), 1)
+        self.assertEqual(BlogPost.objects.filter(info__details__test__exact='test').count(), 1)
 
         # Confirm handles non strings or non existing keys
-        self.assertEquals(BlogPost.objects.filter(info__details__test__exact=5).count(), 0)
-        self.assertEquals(BlogPost.objects.filter(info__made_up__test__exact='test').count(), 0)
+        self.assertEqual(BlogPost.objects.filter(info__details__test__exact=5).count(), 0)
+        self.assertEqual(BlogPost.objects.filter(info__made_up__test__exact='test').count(), 0)
+
+        post = BlogPost.objects.create(info={'title': 'original'})
+        post.info.update({'title': 'updated'})
+        post.save()
+        post.reload()
+        self.assertEqual('updated', post.info['title'])
+
         BlogPost.drop_collection()
 
     def test_dictfield_strict(self):
@@ -651,19 +868,19 @@ class FieldTest(unittest.TestCase):
         self.assertTrue(isinstance(e2.mapping['someint'], IntegerSetting))
 
         # Test querying
-        self.assertEquals(Simple.objects.filter(mapping__someint__value=42).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__nested_dict__number=1).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__nested_dict__complex__value=42).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__nested_dict__list__0__value=42).count(), 1)
-        self.assertEquals(Simple.objects.filter(mapping__nested_dict__list__1__value='foo').count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__someint__value=42).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__nested_dict__number=1).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__nested_dict__complex__value=42).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__nested_dict__list__0__value=42).count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__nested_dict__list__1__value='foo').count(), 1)
 
         # Confirm can update
         Simple.objects().update(
             set__mapping={"someint": IntegerSetting(value=10)})
         Simple.objects().update(
             set__mapping__nested_dict__list__1=StringSetting(value='Boo'))
-        self.assertEquals(Simple.objects.filter(mapping__nested_dict__list__1__value='foo').count(), 0)
-        self.assertEquals(Simple.objects.filter(mapping__nested_dict__list__1__value='Boo').count(), 1)
+        self.assertEqual(Simple.objects.filter(mapping__nested_dict__list__1__value='foo').count(), 0)
+        self.assertEqual(Simple.objects.filter(mapping__nested_dict__list__1__value='Boo').count(), 1)
 
         Simple.drop_collection()
 
@@ -726,6 +943,61 @@ class FieldTest(unittest.TestCase):
         self.assertRaises(ValidationError, create_invalid_mapping)
 
         Extensible.drop_collection()
+
+    def test_embedded_mapfield_db_field(self):
+
+        class Embedded(EmbeddedDocument):
+            number = IntField(default=0, db_field='i')
+
+        class Test(Document):
+            my_map = MapField(field=EmbeddedDocumentField(Embedded), db_field='x')
+
+        Test.drop_collection()
+
+        test = Test()
+        test.my_map['DICTIONARY_KEY'] = Embedded(number=1)
+        test.save()
+
+        Test.objects.update_one(inc__my_map__DICTIONARY_KEY__number=1)
+
+        test = Test.objects.get()
+        self.assertEqual(test.my_map['DICTIONARY_KEY'].number, 2)
+        doc = self.db.test.find_one()
+        self.assertEqual(doc['x']['DICTIONARY_KEY']['i'], 2)
+
+    def test_map_field_lookup(self):
+        """Ensure MapField lookups succeed on Fields without a lookup method"""
+
+        class Log(Document):
+            name = StringField()
+            visited = MapField(DateTimeField())
+
+        Log.drop_collection()
+        Log(name="wilson", visited={'friends': datetime.datetime.now()}).save()
+
+        self.assertEqual(1, Log.objects(
+                                visited__friends__exists=True).count())
+
+    def test_embedded_db_field(self):
+
+        class Embedded(EmbeddedDocument):
+            number = IntField(default=0, db_field='i')
+
+        class Test(Document):
+            embedded = EmbeddedDocumentField(Embedded, db_field='x')
+
+        Test.drop_collection()
+
+        test = Test()
+        test.embedded = Embedded(number=1)
+        test.save()
+
+        Test.objects.update_one(inc__embedded__number=1)
+
+        test = Test.objects.get()
+        self.assertEqual(test.embedded.number, 2)
+        doc = self.db.test.find_one()
+        self.assertEqual(doc['x']['i'], 2)
 
     def test_embedded_document_validation(self):
         """Ensure that invalid embedded documents cannot be assigned to
@@ -815,6 +1087,52 @@ class FieldTest(unittest.TestCase):
         User.drop_collection()
         BlogPost.drop_collection()
 
+    def test_dbref_reference_fields(self):
+
+        class Person(Document):
+            name = StringField()
+            parent = ReferenceField('self', dbref=True)
+
+        Person.drop_collection()
+
+        p1 = Person(name="John").save()
+        Person(name="Ross", parent=p1).save()
+
+        col = Person._get_collection()
+        data = col.find_one({'name': 'Ross'})
+        self.assertEqual(data['parent'], DBRef('person', p1.pk))
+
+        p = Person.objects.get(name="Ross")
+        self.assertEqual(p.parent, p1)
+
+    def test_dbref_to_mongo(self):
+        class Person(Document):
+            name = StringField()
+            parent = ReferenceField('self', dbref=False)
+
+        p1 = Person._from_son({'name': "Yakxxx",
+                               'parent': "50a234ea469ac1eda42d347d"})
+        mongoed = p1.to_mongo()
+        self.assertTrue(isinstance(mongoed['parent'], ObjectId))
+
+    def test_objectid_reference_fields(self):
+
+        class Person(Document):
+            name = StringField()
+            parent = ReferenceField('self', dbref=False)
+
+        Person.drop_collection()
+
+        p1 = Person(name="John").save()
+        Person(name="Ross", parent=p1).save()
+
+        col = Person._get_collection()
+        data = col.find_one({'name': 'Ross'})
+        self.assertEqual(data['parent'], p1.pk)
+
+        p = Person.objects.get(name="Ross")
+        self.assertEqual(p.parent, p1)
+
     def test_list_item_dereference(self):
         """Ensure that DBRef items in ListFields are dereferenced.
         """
@@ -851,6 +1169,7 @@ class FieldTest(unittest.TestCase):
             boss = ReferenceField('self')
             friends = ListField(ReferenceField('self'))
 
+        Employee.drop_collection()
         bill = Employee(name='Bill Lumbergh')
         bill.save()
 
@@ -942,14 +1261,28 @@ class FieldTest(unittest.TestCase):
         class Company(Document):
             name = StringField()
 
+        Product.drop_collection()
+        Company.drop_collection()
+
         ten_gen = Company(name='10gen')
         ten_gen.save()
         mongodb = Product(name='MongoDB', company=ten_gen)
         mongodb.save()
 
+        me = Product(name='MongoEngine')
+        me.save()
+
         obj = Product.objects(company=ten_gen).first()
         self.assertEqual(obj, mongodb)
         self.assertEqual(obj.company, ten_gen)
+
+        obj = Product.objects(company=None).first()
+        self.assertEqual(obj, me)
+
+        obj, created = Product.objects.get_or_create(company=None)
+
+        self.assertEqual(created, False)
+        self.assertEqual(obj, me)
 
     def test_reference_query_conversion(self):
         """Ensure that ReferenceFields can be queried using objects and values
@@ -960,7 +1293,41 @@ class FieldTest(unittest.TestCase):
 
         class BlogPost(Document):
             title = StringField()
-            author = ReferenceField(Member)
+            author = ReferenceField(Member, dbref=False)
+
+        Member.drop_collection()
+        BlogPost.drop_collection()
+
+        m1 = Member(user_num=1)
+        m1.save()
+        m2 = Member(user_num=2)
+        m2.save()
+
+        post1 = BlogPost(title='post 1', author=m1)
+        post1.save()
+
+        post2 = BlogPost(title='post 2', author=m2)
+        post2.save()
+
+        post = BlogPost.objects(author=m1).first()
+        self.assertEqual(post.id, post1.id)
+
+        post = BlogPost.objects(author=m2).first()
+        self.assertEqual(post.id, post2.id)
+
+        Member.drop_collection()
+        BlogPost.drop_collection()
+
+    def test_reference_query_conversion_dbref(self):
+        """Ensure that ReferenceFields can be queried using objects and values
+        of the type of the primary key of the referenced object.
+        """
+        class Member(Document):
+            user_num = IntField(primary_key=True)
+
+        class BlogPost(Document):
+            title = StringField()
+            author = ReferenceField(Member, dbref=True)
 
         Member.drop_collection()
         BlogPost.drop_collection()
@@ -1062,7 +1429,6 @@ class FieldTest(unittest.TestCase):
         Post.drop_collection()
         User.drop_collection()
 
-
     def test_generic_reference_document_not_registered(self):
         """Ensure dereferencing out of the document registry throws a
         `NotRegistered` error.
@@ -1089,7 +1455,7 @@ class FieldTest(unittest.TestCase):
         user = User.objects.first()
         try:
             user.bookmarks
-            raise AssertionError, "Link was removed from the registry"
+            raise AssertionError("Link was removed from the registry")
         except NotRegistered:
             pass
 
@@ -1105,8 +1471,76 @@ class FieldTest(unittest.TestCase):
         Person.drop_collection()
         Person(name="Wilson Jr").save()
 
-        self.assertEquals(repr(Person.objects(city=None)),
+        self.assertEqual(repr(Person.objects(city=None)),
                             "[<Person: Person object>]")
+
+
+    def test_generic_reference_choices(self):
+        """Ensure that a GenericReferenceField can handle choices
+        """
+        class Link(Document):
+            title = StringField()
+
+        class Post(Document):
+            title = StringField()
+
+        class Bookmark(Document):
+            bookmark_object = GenericReferenceField(choices=(Post,))
+
+        Link.drop_collection()
+        Post.drop_collection()
+        Bookmark.drop_collection()
+
+        link_1 = Link(title="Pitchfork")
+        link_1.save()
+
+        post_1 = Post(title="Behind the Scenes of the Pavement Reunion")
+        post_1.save()
+
+        bm = Bookmark(bookmark_object=link_1)
+        self.assertRaises(ValidationError, bm.validate)
+
+        bm = Bookmark(bookmark_object=post_1)
+        bm.save()
+
+        bm = Bookmark.objects.first()
+        self.assertEqual(bm.bookmark_object, post_1)
+
+    def test_generic_reference_list_choices(self):
+        """Ensure that a ListField properly dereferences generic references and
+        respects choices.
+        """
+        class Link(Document):
+            title = StringField()
+
+        class Post(Document):
+            title = StringField()
+
+        class User(Document):
+            bookmarks = ListField(GenericReferenceField(choices=(Post,)))
+
+        Link.drop_collection()
+        Post.drop_collection()
+        User.drop_collection()
+
+        link_1 = Link(title="Pitchfork")
+        link_1.save()
+
+        post_1 = Post(title="Behind the Scenes of the Pavement Reunion")
+        post_1.save()
+
+        user = User(bookmarks=[link_1])
+        self.assertRaises(ValidationError, user.validate)
+
+        user = User(bookmarks=[post_1])
+        user.save()
+
+        user = User.objects.first()
+        self.assertEqual(user.bookmarks, [post_1])
+
+        Link.drop_collection()
+        Post.drop_collection()
+        User.drop_collection()
 
     def test_binary_fields(self):
         """Ensure that binary fields can be stored and retrieved.
@@ -1115,7 +1549,7 @@ class FieldTest(unittest.TestCase):
             content_type = StringField()
             blob = BinaryField()
 
-        BLOB = '\xe6\x00\xc4\xff\x07'
+        BLOB = b('\xe6\x00\xc4\xff\x07')
         MIME_TYPE = 'application/octet-stream'
 
         Attachment.drop_collection()
@@ -1125,7 +1559,7 @@ class FieldTest(unittest.TestCase):
 
         attachment_1 = Attachment.objects().first()
         self.assertEqual(MIME_TYPE, attachment_1.content_type)
-        self.assertEqual(BLOB, attachment_1.blob)
+        self.assertEqual(BLOB, bin_type(attachment_1.blob))
 
         Attachment.drop_collection()
 
@@ -1152,17 +1586,29 @@ class FieldTest(unittest.TestCase):
 
         attachment_required = AttachmentRequired()
         self.assertRaises(ValidationError, attachment_required.validate)
-        attachment_required.blob = '\xe6\x00\xc4\xff\x07'
+        attachment_required.blob = Binary(b('\xe6\x00\xc4\xff\x07'))
         attachment_required.validate()
 
-        attachment_size_limit = AttachmentSizeLimit(blob='\xe6\x00\xc4\xff\x07')
+        attachment_size_limit = AttachmentSizeLimit(blob=b('\xe6\x00\xc4\xff\x07'))
         self.assertRaises(ValidationError, attachment_size_limit.validate)
-        attachment_size_limit.blob = '\xe6\x00\xc4\xff'
+        attachment_size_limit.blob = b('\xe6\x00\xc4\xff')
         attachment_size_limit.validate()
 
         Attachment.drop_collection()
         AttachmentRequired.drop_collection()
         AttachmentSizeLimit.drop_collection()
+
+    def test_binary_field_primary(self):
+
+        class Attachment(Document):
+            id = BinaryField(primary_key=True)
+
+        Attachment.drop_collection()
+
+        att = Attachment(id=uuid.uuid4().bytes).save()
+        att.delete()
+
+        self.assertEqual(0, Attachment.objects.count())
 
     def test_choices_validation(self):
         """Ensure that value is in a container of allowed values.
@@ -1213,20 +1659,67 @@ class FieldTest(unittest.TestCase):
 
         Shirt.drop_collection()
 
+    def test_simple_choices_validation(self):
+        """Ensure that value is in a container of allowed values.
+        """
+        class Shirt(Document):
+            size = StringField(max_length=3, choices=('S', 'M', 'L', 'XL', 'XXL'))
+
+        Shirt.drop_collection()
+
+        shirt = Shirt()
+        shirt.validate()
+
+        shirt.size = "S"
+        shirt.validate()
+
+        shirt.size = "XS"
+        self.assertRaises(ValidationError, shirt.validate)
+
+        Shirt.drop_collection()
+
+    def test_simple_choices_get_field_display(self):
+        """Test dynamic helper for returning the display value of a choices field.
+        """
+        class Shirt(Document):
+            size = StringField(max_length=3, choices=('S', 'M', 'L', 'XL', 'XXL'))
+            style = StringField(max_length=3, choices=('Small', 'Baggy', 'wide'), default='Small')
+
+        Shirt.drop_collection()
+
+        shirt = Shirt()
+
+        self.assertEqual(shirt.get_size_display(), None)
+        self.assertEqual(shirt.get_style_display(), 'Small')
+
+        shirt.size = "XXL"
+        shirt.style = "Baggy"
+        self.assertEqual(shirt.get_size_display(), 'XXL')
+        self.assertEqual(shirt.get_style_display(), 'Baggy')
+
+        # Set as Z - an invalid choice
+        shirt.size = "Z"
+        shirt.style = "Z"
+        self.assertEqual(shirt.get_size_display(), 'Z')
+        self.assertEqual(shirt.get_style_display(), 'Z')
+        self.assertRaises(ValidationError, shirt.validate)
+
+        Shirt.drop_collection()
+
     def test_file_fields(self):
         """Ensure that file fields can be written to and their data retrieved
         """
         class PutFile(Document):
-            file = FileField()
+            the_file = FileField()
 
         class StreamFile(Document):
-            file = FileField()
+            the_file = FileField()
 
         class SetFile(Document):
-            file = FileField()
+            the_file = FileField()
 
-        text = 'Hello, World!'
-        more_text = 'Foo Bar'
+        text = b('Hello, World!')
+        more_text = b('Foo Bar')
         content_type = 'text/plain'
 
         PutFile.drop_collection()
@@ -1234,53 +1727,68 @@ class FieldTest(unittest.TestCase):
         SetFile.drop_collection()
 
         putfile = PutFile()
-        putfile.file.put(text, content_type=content_type)
+        putfile.the_file.put(text, content_type=content_type)
         putfile.save()
         putfile.validate()
         result = PutFile.objects.first()
         self.assertTrue(putfile == result)
-        self.assertEquals(result.file.read(), text)
-        self.assertEquals(result.file.content_type, content_type)
-        result.file.delete() # Remove file from GridFS
+        self.assertEqual(result.the_file.read(), text)
+        self.assertEqual(result.the_file.content_type, content_type)
+        result.the_file.delete() # Remove file from GridFS
+        PutFile.objects.delete()
+
+        # Ensure file-like objects are stored
+        putfile = PutFile()
+        putstring = StringIO()
+        putstring.write(text)
+        putstring.seek(0)
+        putfile.the_file.put(putstring, content_type=content_type)
+        putfile.save()
+        putfile.validate()
+        result = PutFile.objects.first()
+        self.assertTrue(putfile == result)
+        self.assertEqual(result.the_file.read(), text)
+        self.assertEqual(result.the_file.content_type, content_type)
+        result.the_file.delete()
 
         streamfile = StreamFile()
-        streamfile.file.new_file(content_type=content_type)
-        streamfile.file.write(text)
-        streamfile.file.write(more_text)
-        streamfile.file.close()
+        streamfile.the_file.new_file(content_type=content_type)
+        streamfile.the_file.write(text)
+        streamfile.the_file.write(more_text)
+        streamfile.the_file.close()
         streamfile.save()
         streamfile.validate()
         result = StreamFile.objects.first()
         self.assertTrue(streamfile == result)
-        self.assertEquals(result.file.read(), text + more_text)
-        self.assertEquals(result.file.content_type, content_type)
-        result.file.seek(0)
-        self.assertEquals(result.file.tell(), 0)
-        self.assertEquals(result.file.read(len(text)), text)
-        self.assertEquals(result.file.tell(), len(text))
-        self.assertEquals(result.file.read(len(more_text)), more_text)
-        self.assertEquals(result.file.tell(), len(text + more_text))
-        result.file.delete()
+        self.assertEqual(result.the_file.read(), text + more_text)
+        self.assertEqual(result.the_file.content_type, content_type)
+        result.the_file.seek(0)
+        self.assertEqual(result.the_file.tell(), 0)
+        self.assertEqual(result.the_file.read(len(text)), text)
+        self.assertEqual(result.the_file.tell(), len(text))
+        self.assertEqual(result.the_file.read(len(more_text)), more_text)
+        self.assertEqual(result.the_file.tell(), len(text + more_text))
+        result.the_file.delete()
 
         # Ensure deleted file returns None
-        self.assertTrue(result.file.read() == None)
+        self.assertTrue(result.the_file.read() == None)
 
         setfile = SetFile()
-        setfile.file = text
+        setfile.the_file = text
         setfile.save()
         setfile.validate()
         result = SetFile.objects.first()
         self.assertTrue(setfile == result)
-        self.assertEquals(result.file.read(), text)
+        self.assertEqual(result.the_file.read(), text)
 
         # Try replacing file with new one
-        result.file.replace(more_text)
+        result.the_file.replace(more_text)
         result.save()
         result.validate()
         result = SetFile.objects.first()
         self.assertTrue(setfile == result)
-        self.assertEquals(result.file.read(), more_text)
-        result.file.delete()
+        self.assertEqual(result.the_file.read(), more_text)
+        result.the_file.delete()
 
         PutFile.drop_collection()
         StreamFile.drop_collection()
@@ -1288,28 +1796,71 @@ class FieldTest(unittest.TestCase):
 
         # Make sure FileField is optional and not required
         class DemoFile(Document):
-            file = FileField()
-        d = DemoFile.objects.create()
+            the_file = FileField()
+        DemoFile.objects.create()
+
+
+    def test_file_field_no_default(self):
+
+        class GridDocument(Document):
+            the_file = FileField()
+
+        GridDocument.drop_collection()
+
+        with tempfile.TemporaryFile() as f:
+            f.write(b("Hello World!"))
+            f.flush()
+
+            # Test without default
+            doc_a = GridDocument()
+            doc_a.save()
+
+
+            doc_b = GridDocument.objects.with_id(doc_a.id)
+            doc_b.the_file.replace(f, filename='doc_b')
+            doc_b.save()
+            self.assertNotEqual(doc_b.the_file.grid_id, None)
+
+            # Test it matches
+            doc_c = GridDocument.objects.with_id(doc_b.id)
+            self.assertEqual(doc_b.the_file.grid_id, doc_c.the_file.grid_id)
+
+            # Test with default
+            doc_d = GridDocument(the_file=b(''))
+            doc_d.save()
+
+            doc_e = GridDocument.objects.with_id(doc_d.id)
+            self.assertEqual(doc_d.the_file.grid_id, doc_e.the_file.grid_id)
+
+            doc_e.the_file.replace(f, filename='doc_e')
+            doc_e.save()
+
+            doc_f = GridDocument.objects.with_id(doc_e.id)
+            self.assertEqual(doc_e.the_file.grid_id, doc_f.the_file.grid_id)
+
+        db = GridDocument._get_db()
+        grid_fs = gridfs.GridFS(db)
+        self.assertEqual(['doc_b', 'doc_e'], grid_fs.list())
 
     def test_file_uniqueness(self):
         """Ensure that each instance of a FileField is unique
         """
         class TestFile(Document):
             name = StringField()
-            file = FileField()
+            the_file = FileField()
 
         # First instance
-        testfile = TestFile()
-        testfile.name = "Hello, World!"
-        testfile.file.put('Hello, World!')
-        testfile.save()
+        test_file = TestFile()
+        test_file.name = "Hello, World!"
+        test_file.the_file.put(b('Hello, World!'))
+        test_file.save()
 
         # Second instance
-        testfiledupe = TestFile()
-        data = testfiledupe.file.read() # Should be None
+        test_file_dupe = TestFile()
+        data = test_file_dupe.the_file.read() # Should be None
 
-        self.assertTrue(testfile.name != testfiledupe.name)
-        self.assertTrue(testfile.file.read() != data)
+        self.assertTrue(test_file.name != test_file_dupe.name)
+        self.assertTrue(test_file.the_file.read() != data)
 
         TestFile.drop_collection()
 
@@ -1317,16 +1868,141 @@ class FieldTest(unittest.TestCase):
         """Ensure that a boolean test of a FileField indicates its presence
         """
         class TestFile(Document):
-            file = FileField()
+            the_file = FileField()
 
-        testfile = TestFile()
-        self.assertFalse(bool(testfile.file))
-        testfile.file = 'Hello, World!'
-        testfile.file.content_type = 'text/plain'
-        testfile.save()
-        self.assertTrue(bool(testfile.file))
+        test_file = TestFile()
+        self.assertFalse(bool(test_file.the_file))
+        test_file.the_file = b('Hello, World!')
+        test_file.the_file.content_type = 'text/plain'
+        test_file.save()
+        self.assertTrue(bool(test_file.the_file))
 
         TestFile.drop_collection()
+
+    def test_file_cmp(self):
+        """Test comparing against other types"""
+        class TestFile(Document):
+            the_file = FileField()
+
+        test_file = TestFile()
+        self.assertFalse(test_file.the_file in [{"test": 1}])
+
+    def test_image_field(self):
+        if PY3:
+            raise SkipTest('PIL does not have Python 3 support')
+
+        class TestImage(Document):
+            image = ImageField()
+
+        TestImage.drop_collection()
+
+        t = TestImage()
+        t.image.put(open(TEST_IMAGE_PATH, 'r'))
+        t.save()
+
+        t = TestImage.objects.first()
+
+        self.assertEqual(t.image.format, 'PNG')
+
+        w, h = t.image.size
+        self.assertEqual(w, 371)
+        self.assertEqual(h, 76)
+
+        t.image.delete()
+
+    def test_image_field_resize(self):
+        if PY3:
+            raise SkipTest('PIL does not have Python 3 support')
+
+        class TestImage(Document):
+            image = ImageField(size=(185, 37))
+
+        TestImage.drop_collection()
+
+        t = TestImage()
+        t.image.put(open(TEST_IMAGE_PATH, 'r'))
+        t.save()
+
+        t = TestImage.objects.first()
+
+        self.assertEqual(t.image.format, 'PNG')
+        w, h = t.image.size
+
+        self.assertEqual(w, 185)
+        self.assertEqual(h, 37)
+
+        t.image.delete()
+
+    def test_image_field_resize_force(self):
+        if PY3:
+            raise SkipTest('PIL does not have Python 3 support')
+
+        class TestImage(Document):
+            image = ImageField(size=(185, 37, True))
+
+        TestImage.drop_collection()
+
+        t = TestImage()
+        t.image.put(open(TEST_IMAGE_PATH, 'r'))
+        t.save()
+
+        t = TestImage.objects.first()
+
+        self.assertEqual(t.image.format, 'PNG')
+        w, h = t.image.size
+
+        self.assertEqual(w, 185)
+        self.assertEqual(h, 37)
+
+        t.image.delete()
+
+    def test_image_field_thumbnail(self):
+        if PY3:
+            raise SkipTest('PIL does not have Python 3 support')
+
+        class TestImage(Document):
+            image = ImageField(thumbnail_size=(92, 18))
+
+        TestImage.drop_collection()
+
+        t = TestImage()
+        t.image.put(open(TEST_IMAGE_PATH, 'r'))
+        t.save()
+
+        t = TestImage.objects.first()
+
+        self.assertEqual(t.image.thumbnail.format, 'PNG')
+        self.assertEqual(t.image.thumbnail.width, 92)
+        self.assertEqual(t.image.thumbnail.height, 18)
+
+        t.image.delete()
+
+    def test_file_multidb(self):
+        register_connection('test_files', 'test_files')
+        class TestFile(Document):
+            name = StringField()
+            the_file = FileField(db_alias="test_files",
+                                 collection_name="macumba")
+
+        TestFile.drop_collection()
+
+        # delete old filesystem
+        get_db("test_files").macumba.files.drop()
+        get_db("test_files").macumba.chunks.drop()
+
+        # First instance
+        test_file = TestFile()
+        test_file.name = "Hello, World!"
+        test_file.the_file.put(b('Hello, World!'),
+                          name="hello.txt")
+        test_file.save()
+
+        data = get_db("test_files").macumba.files.find_one()
+        self.assertEqual(data.get('name'), 'hello.txt')
+
+        test_file = TestFile.objects.first()
+        self.assertEqual(test_file.the_file.read(),
+                          b('Hello, World!'))
 
     def test_geo_indexes(self):
         """Ensure that indexes are created automatically for GeoPointFields.
@@ -1399,6 +2075,27 @@ class FieldTest(unittest.TestCase):
         self.assertEqual(ids, range(1, 11))
 
         c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+    def test_sequence_field_sequence_name(self):
+        class Person(Document):
+            id = SequenceField(primary_key=True, sequence_name='jelly')
+            name = StringField()
+
+        self.db['mongoengine.counters'].drop()
+        Person.drop_collection()
+
+        for x in xrange(10):
+            p = Person(name="Person %s" % x)
+            p.save()
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'jelly.id'})
+        self.assertEqual(c['next'], 10)
+
+        ids = [i.id for i in Person.objects]
+        self.assertEqual(ids, range(1, 11))
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'jelly.id'})
         self.assertEqual(c['next'], 10)
 
     def test_multiple_sequence_fields(self):
@@ -1488,6 +2185,27 @@ class FieldTest(unittest.TestCase):
         c = self.db['mongoengine.counters'].find_one({'_id': 'animal.id'})
         self.assertEqual(c['next'], 10)
 
+    def test_embedded_sequence_field(self):
+        class Comment(EmbeddedDocument):
+            id = SequenceField()
+            content = StringField(required=True)
+
+        class Post(Document):
+            title = StringField(required=True)
+            comments = ListField(EmbeddedDocumentField(Comment))
+
+        self.db['mongoengine.counters'].drop()
+        Post.drop_collection()
+
+        Post(title="MongoEngine",
+             comments=[Comment(content="NoSQL Rocks"),
+                       Comment(content="MongoEngine Rocks")]).save()
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'comment.id'})
+        self.assertEqual(c['next'], 2)
+        post = Post.objects.first()
+        self.assertEqual(1, post.comments[0].id)
+        self.assertEqual(2, post.comments[1].id)
 
     def test_generic_embedded_document(self):
         class Car(EmbeddedDocument):
@@ -1501,6 +2219,8 @@ class FieldTest(unittest.TestCase):
             name = StringField()
             like = GenericEmbeddedDocumentField()
 
+        Person.drop_collection()
+
         person = Person(name='Test User')
         person.like = Car(name='Fiat')
         person.save()
@@ -1513,6 +2233,116 @@ class FieldTest(unittest.TestCase):
 
         person = Person.objects.first()
         self.assertTrue(isinstance(person.like, Dish))
+
+    def test_generic_embedded_document_choices(self):
+        """Ensure you can limit GenericEmbeddedDocument choices
+        """
+        class Car(EmbeddedDocument):
+            name = StringField()
+
+        class Dish(EmbeddedDocument):
+            food = StringField(required=True)
+            number = IntField()
+
+        class Person(Document):
+            name = StringField()
+            like = GenericEmbeddedDocumentField(choices=(Dish,))
+
+        Person.drop_collection()
+
+        person = Person(name='Test User')
+        person.like = Car(name='Fiat')
+        self.assertRaises(ValidationError, person.validate)
+
+        person.like = Dish(food="arroz", number=15)
+        person.save()
+
+        person = Person.objects.first()
+        self.assertTrue(isinstance(person.like, Dish))
+
+    def test_generic_list_embedded_document_choices(self):
+        """Ensure you can limit GenericEmbeddedDocument choices inside a list
+        field
+        """
+        class Car(EmbeddedDocument):
+            name = StringField()
+
+        class Dish(EmbeddedDocument):
+            food = StringField(required=True)
+            number = IntField()
+
+        class Person(Document):
+            name = StringField()
+            likes = ListField(GenericEmbeddedDocumentField(choices=(Dish,)))
+
+        Person.drop_collection()
+
+        person = Person(name='Test User')
+        person.likes = [Car(name='Fiat')]
+        self.assertRaises(ValidationError, person.validate)
+
+        person.likes = [Dish(food="arroz", number=15)]
+        person.save()
+
+        person = Person.objects.first()
+        self.assertTrue(isinstance(person.likes[0], Dish))
+
+    def test_recursive_validation(self):
+        """Ensure that a validation result to_dict is available.
+        """
+        class Author(EmbeddedDocument):
+            name = StringField(required=True)
+
+        class Comment(EmbeddedDocument):
+            author = EmbeddedDocumentField(Author, required=True)
+            content = StringField(required=True)
+
+        class Post(Document):
+            title = StringField(required=True)
+            comments = ListField(EmbeddedDocumentField(Comment))
+
+        bob = Author(name='Bob')
+        post = Post(title='hello world')
+        post.comments.append(Comment(content='hello', author=bob))
+        post.comments.append(Comment(author=bob))
+
+        self.assertRaises(ValidationError, post.validate)
+        try:
+            post.validate()
+        except ValidationError, error:
+            # ValidationError.errors property
+            self.assertTrue(hasattr(error, 'errors'))
+            self.assertTrue(isinstance(error.errors, dict))
+            self.assertTrue('comments' in error.errors)
+            self.assertTrue(1 in error.errors['comments'])
+            self.assertTrue(isinstance(error.errors['comments'][1]['content'],
+                            ValidationError))
+
+            # ValidationError.schema property
+            error_dict = error.to_dict()
+            self.assertTrue(isinstance(error_dict, dict))
+            self.assertTrue('comments' in error_dict)
+            self.assertTrue(1 in error_dict['comments'])
+            self.assertTrue('content' in error_dict['comments'][1])
+            self.assertEqual(error_dict['comments'][1]['content'],
+                              u'Field is required')
+
+
+        post.comments[1].content = 'here we go'
+        post.validate()
+
+    def test_email_field_honors_regex(self):
+        class User(Document):
+            email = EmailField(regex=r'\w+@example.com')
+
+        # Fails regex validation
+        user = User(email='me@foo.com')
+        self.assertRaises(ValidationError, user.validate)
+
+        # Passes regex validation
+        user = User(email='me@example.com')
+        self.assertTrue(user.validate() is None)
+
 
 if __name__ == '__main__':
     unittest.main()

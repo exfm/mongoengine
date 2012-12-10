@@ -1,18 +1,34 @@
-# -*- coding: utf-8 -*-
-
+from __future__ import with_statement
 import unittest
-
+from nose.plugins.skip import SkipTest
+from mongoengine.python_support import PY3
 from mongoengine import *
-from mongoengine.django.shortcuts import get_document_or_404
 
-from django.http import Http404
-from django.template import Context, Template
-from django.conf import settings
-settings.configure()
+try:
+    from mongoengine.django.shortcuts import get_document_or_404
+
+    from django.http import Http404
+    from django.template import Context, Template
+    from django.conf import settings
+    from django.core.paginator import Paginator
+
+    settings.configure()
+
+    from django.contrib.sessions.tests import SessionTestsMixin
+    from mongoengine.django.sessions import SessionStore, MongoSession
+except Exception, err:
+    if PY3:
+        SessionTestsMixin = type  # dummy value so no error
+        SessionStore = None  # dummy value so no error
+    else:
+        raise err
+
 
 class QuerySetTest(unittest.TestCase):
 
     def setUp(self):
+        if PY3:
+            raise SkipTest('django does not have Python 3 support')
         connect(db='mongoenginetest')
 
         class Person(Document):
@@ -67,3 +83,40 @@ class QuerySetTest(unittest.TestCase):
         self.assertRaises(Http404, get_document_or_404, self.Person, pk='1234')
         self.assertEqual(p, get_document_or_404(self.Person, pk=p.pk))
 
+    def test_pagination(self):
+        """Ensure that Pagination works as expected
+        """
+        class Page(Document):
+            name = StringField()
+
+        Page.drop_collection()
+
+        for i in xrange(1, 11):
+            Page(name=str(i)).save()
+
+        paginator = Paginator(Page.objects.all(), 2)
+
+        t = Template("{% for i in page.object_list  %}{{ i.name }}:{% endfor %}")
+        for p in paginator.page_range:
+            d = {"page": paginator.page(p)}
+            end = p * 2
+            start = end - 1
+            self.assertEqual(t.render(Context(d)), u'%d:%d:' % (start, end))
+
+
+
+class MongoDBSessionTest(SessionTestsMixin, unittest.TestCase):
+    backend = SessionStore
+
+    def setUp(self):
+        if PY3:
+            raise SkipTest('django does not have Python 3 support')
+        connect(db='mongoenginetest')
+        MongoSession.drop_collection()
+        super(MongoDBSessionTest, self).setUp()
+
+    def test_first_save(self):
+        session = SessionStore()
+        session['test'] = True
+        session.save()
+        self.assertTrue('test' in session)
